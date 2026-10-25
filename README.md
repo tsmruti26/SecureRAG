@@ -226,3 +226,16 @@ Potential next steps include automated API authorization tests, broader retrieva
 ---
 
 **Disclaimer:** SecureRAG is an educational security prototype. It is not a substitute for a production IAM system, a dedicated threat-intelligence platform, or an organization's approved incident-response process.
+
+## Policy-controlled MCP server (incident management)
+
+`mcp_server/` exposes typed tools over MCP (stdio). Identity comes only from the verified JWT in
+`SECURERAG_MCP_TOKEN`; no tool accepts a user or role argument. Every call is policy-checked
+(`policies/*.yaml`, default deny, explicit deny wins) and written to a hash-chained audit log
+(`mcp_data/audit.log.jsonl`). There is no raw-SQL tool and the server never executes containment.
+
+Roles: `employee`, `soc_analyst`, `soc_lead`, `auditor`. Incidents follow `incident://schema`
+(NIST 800-61 lifecycle, MITRE ATT&CK ids, TLP, AI provenance). Run `python -m mcp_server.server`
+and `python -m pytest tests/test_policy_matrix.py -q`. The login endpoint currently issues only
+`employee` and `soc_analyst` tokens; use `scripts/mint_dev_token.py` (dev only) for the others.
+Prototype: not production IAM.

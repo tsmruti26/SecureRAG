@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "securerag-incidents": {
+      "command": "python",
+      "args": ["-m", "mcp_server.server"],
+      "cwd": "C:\\Users\\Smruti\\Desktop\\SecureRAG-main\\SecureRAG-main",
+      "env": { "SECURERAG_MCP_TOKEN": "<paste a JWT from /api/login or scripts/mint_dev_token.py>" }
+    }
+  }
+}

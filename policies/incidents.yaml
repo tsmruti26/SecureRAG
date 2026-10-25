@@ -1,0 +1,108 @@
+# Incident + audit policy. Anything not listed is denied.
+rules:
+  # A closed incident is immutable except via incident.reopen (lead).
+  - id: deny-mutate-closed
+    effect: deny
+    description: closed incidents are read-only
+    action: [incident.add_note, incident.add_ioc, incident.update_status, incident.propose_action, incident.verify_ai]
+    resource: { status_in: [closed] }
+
+  # ---- employees: report + see own report status only -------------------
+  - id: employee-report
+    effect: allow
+    subject: { role: [employee] }
+    action: incident.report_suspected
+    obligations: [audit]
+
+  - id: employee-read-own
+    effect: allow
+    subject: { role: [employee] }
+    action: [incident.get, incident.list]
+    resource: { reporter_is_subject: true }
+    columns_only: [incident_id, title, status, audit]
+    obligations: [audit]
+
+  # ---- SOC analyst -------------------------------------------------------
+  - id: analyst-read
+    effect: allow
+    subject: { role: [soc_analyst] }
+    action: [incident.get, incident.list]
+    resource: { tlp_not: [red], unless_owner: true }
+    mask: [detection.reporter.email, scope.affected_users]
+    obligations: [audit]
+
+  - id: analyst-create
+    effect: allow
+    subject: { role: [soc_analyst, soc_lead] }
+    action: incident.create
+    obligations: [audit]
+
+  - id: analyst-write
+    effect: allow
+    subject: { role: [soc_analyst] }
+    action: [incident.add_note, incident.add_ioc, incident.update_status,
+             incident.propose_action, incident.verify_ai]
+    resource: { tlp_not: [red], unless_owner: true }
+    obligations: [audit]
+
+  # ---- SOC lead ----------------------------------------------------------
+  - id: lead-read
+    effect: allow
+    subject: { role: [soc_lead] }
+    action: [incident.get, incident.list]
+    obligations: [audit]
+
+  - id: lead-write
+    effect: allow
+    subject: { role: [soc_lead] }
+    action: [incident.add_note, incident.add_ioc, incident.update_status,
+             incident.propose_action, incident.verify_ai]
+    obligations: [audit]
+
+  - id: lead-close
+    effect: allow
+    subject: { role: [soc_lead] }
+    action: incident.close
+    resource: { status_in: [recovered, false_positive], requires_ai_verified: true }
+    obligations: [audit, require_reason]
+
+  - id: lead-reopen
+    effect: allow
+    subject: { role: [soc_lead] }
+    action: incident.reopen
+    resource: { status_in: [closed] }
+    obligations: [audit, require_reason]
+
+  # ---- auditor: read-only, PII masked -----------------------------------
+  - id: auditor-read
+    effect: allow
+    subject: { role: [auditor] }
+    action: [incident.get, incident.list]
+    mask: [detection.reporter.email, scope.affected_users]
+    obligations: [audit]
+
+  - id: audit-query
+    effect: allow
+    subject: { role: [auditor, soc_lead] }
+    action: audit.query
+    obligations: []
+
+  # ---- v2: approval flow for proposed actions ------------------------------
+  - id: deny-action-flow-closed
+    effect: deny
+    description: closed incidents are read-only
+    action: [incident.approve_action, incident.reject_action, incident.mark_executed]
+    resource: { status_in: [closed] }
+
+  - id: lead-approve
+    effect: allow
+    subject: { role: [soc_lead] }
+    action: [incident.approve_action, incident.reject_action, incident.mark_executed]
+    obligations: [audit, require_reason]
+
+  - id: analyst-mark-executed
+    effect: allow
+    subject: { role: [soc_analyst] }
+    action: incident.mark_executed
+    resource: { tlp_not: [red], unless_owner: true }
+    obligations: [audit, require_reason]

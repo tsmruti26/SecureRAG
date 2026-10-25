@@ -6,6 +6,8 @@ import {
 } from "lucide-react";
 import "./App.css";
 import Login from "./Login";
+import QrScan from "./QrScan";
+import Incidents, { CreateIncidentFromScan } from "./Incidents";
 import ReactMarkdown from "react-markdown";
 
 const API_BASE = "http://localhost:8001";
@@ -71,6 +73,7 @@ export default function App() {
   const navItems = useMemo(() => {
     const common = [
       ["Overview", LayoutDashboard],
+      ["Incidents", ShieldAlert],
       ["Chat", MessageSquare],
       ["Knowledge Base", Database],
       ["Security Tests", ShieldCheck],
@@ -79,10 +82,12 @@ export default function App() {
     if (isSoc) {
       return [
         ["Overview", LayoutDashboard],
+      ["Incidents", ShieldAlert],
         ["Alert Investigation", Siren],
         ["Security Assistant", MessageSquare],
         ["Incident Report", ClipboardList],
         ["Typosquatting Scanner", Globe],
+        ["QR Phishing", ShieldAlert],
         ["Knowledge Base", Database],
         ["Security Tests", ShieldCheck],
         ["Activity Logs", Activity],
@@ -505,9 +510,18 @@ async function askBackend(question) {
                   </tr>)}</tbody>
                 </table>
               </div>
+              {session?.role !== "auditor" && <CreateIncidentFromScan token={session.access_token} scan={scanResult} />}
               <p className="chat-disclaimer">Similarity candidates are generated heuristically. Review results manually and validate against trusted threat-intelligence sources before taking action.</p>
             </div>}
           </div>
+        )}
+
+        {page === "Incidents" && (
+          <Incidents token={session.access_token} role={session.role} />
+        )}
+
+        {page === "QR Phishing" && isSoc && (
+          <QrScan token={session.access_token} />
         )}
 
         {page === "Security Tests" && (

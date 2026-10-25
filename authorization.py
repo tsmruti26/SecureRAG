@@ -1,62 +1,44 @@
+"""Retrieval authorization, now driven by policies/kb.yaml (same rules as the MCP server).
+
+Differences from the old version: the policy's scopes are applied as a Chroma
+metadata PRE-filter (so unauthorized chunks cannot crowd out authorized ones),
+and the same scopes are re-checked on every returned chunk as defense in depth.
+"""
+from pathlib import Path
+
+from mcp_server.policy import PolicyEngine, Subject, kb_scope_filter
+
+_ENGINE = PolicyEngine.from_dir(Path(__file__).resolve().parent / "policies")
+_SOC_ROLES = {"soc_analyst", "soc_lead", "auditor"}
+_EMPLOYEE_DEPARTMENTS = {"hr", "engineering", "finance"}
+
+
+def _in_scope(metadata, scopes) -> bool:
+    metadata = metadata or {}
+    dept = str(metadata.get("department", "")).strip().lower()
+    cls = str(metadata.get("classification", "")).strip().lower()
+    return any(dept == dict(s)["department"] and cls == dict(s)["classification"] for s in scopes)
+
 
 def retrieve_authorized_documents(vector_store, question, user):
     """Retrieve documents allowed for the authenticated user's role."""
-
-    candidates = vector_store.similarity_search(question, k=10)
-    authorized = []
-
     department = str(user.get("department", "")).strip().lower()
     role = str(user.get("role", "")).strip().lower()
-
-    # SOC analysts can access only documents explicitly classified
-    # for the SOC role in the SOC knowledge base.
-    if role == "soc_analyst" or department == "soc":
-        for doc in candidates:
-            metadata = doc.metadata or {}
-            doc_department = str(
-                metadata.get("department", "")
-            ).strip().lower()
-            doc_classification = str(
-                metadata.get("classification", "")
-            ).strip().lower()
-
-            if (
-                doc_department == "soc"
-                and doc_classification in {"internal", "confidential"}
-            ):
-                authorized.append(doc)
-
-        return authorized[:3]
-
-    # Existing departmental access rules.
-    if department not in {"hr", "engineering", "finance"}:
+    if not role:  # legacy callers that only pass a department
+        role = ("employee" if department in _EMPLOYEE_DEPARTMENTS
+                else "soc_analyst" if department == "soc" else "")
+    if not role or not department:
         return []
 
-    for doc in candidates:
-        metadata = doc.metadata or {}
-        doc_department = str(
-            metadata.get("department", "")
-        ).strip().lower()
-        doc_classification = str(
-            metadata.get("classification", "")
-        ).strip().lower()
+    collection = "soc" if role in _SOC_ROLES else "handbook"
+    decision = _ENGINE.decide(Subject(str(user.get("username", "")), role, department),
+                              "kb.search", {"collection": collection})
+    if not decision.allow:
+        return []
 
-        # Shared internal documents.
-        if (
-            doc_department == "all"
-            and doc_classification == "internal"
-        ):
-            authorized.append(doc)
-
-        # Confidential HR documents.
-        elif (
-            doc_department == "hr"
-            and doc_classification == "confidential"
-            and department == "hr"
-        ):
-            authorized.append(doc)
-
-        # Engineering and Finance receive no additional access
-        # until their own document policies are explicitly defined.
-
-    return authorized[:3]
+    try:
+        candidates = vector_store.similarity_search(question, k=10,
+                                                    filter=kb_scope_filter(decision))
+    except TypeError:  # store without filter support: post-filter below still applies
+        candidates = vector_store.similarity_search(question, k=10)
+    return [d for d in candidates if _in_scope(d.metadata, decision.kb_scopes)][:3]

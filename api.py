@@ -80,25 +80,60 @@ app.add_middleware(
     allow_headers=["Content-Type", "Authorization"],
 )
 
-embeddings = HuggingFaceEmbeddings(
-    model_name="sentence-transformers/all-MiniLM-L6-v2",
-    model_kwargs={"device": "cpu"},
-)
+import threading
+from functools import lru_cache
 
-# Existing company knowledge base
-vector_store = Chroma(
-    collection_name="company_handbook",
-    embedding_function=embeddings,
-    persist_directory=str(BASE_DIR / "chroma_db"),
-)
 
-# Dedicated SOC security knowledge base
-soc_vector_store = Chroma(
-    collection_name="soc_security_kb",
-    embedding_function=embeddings,
-    persist_directory=str(BASE_DIR / "chroma_db"),
-)
+_LOCK = threading.RLock()
 
+
+def _once(fn):
+    cache = {}
+
+    def wrapper():
+        with _LOCK:
+            if "v" not in cache:
+                cache["v"] = fn()
+            return cache["v"]
+
+    return wrapper
+
+
+@_once
+def _get_embeddings():
+    return HuggingFaceEmbeddings(
+        model_name="sentence-transformers/all-MiniLM-L6-v2",
+        model_kwargs={"device": "cpu"},
+    )
+
+
+@_once
+def get_vector_store():  # company knowledge base
+    return Chroma(
+        collection_name="company_handbook",
+        embedding_function=_get_embeddings(),
+        persist_directory=str(BASE_DIR / "chroma_db"),
+    )
+
+
+@_once
+def get_soc_vector_store():  # SOC security knowledge base
+    return Chroma(
+        collection_name="soc_security_kb",
+        embedding_function=_get_embeddings(),
+        persist_directory=str(BASE_DIR / "chroma_db"),
+    )
+
+
+def _warm():
+    try:
+        get_vector_store()
+        get_soc_vector_store()
+    except Exception as exc:  # first request will retry and surface the error
+        print("warm-up failed:", exc)
+
+
+threading.Thread(target=_warm, daemon=True).start()
 
 
 class ChatRequest(BaseModel):
@@ -142,6 +177,14 @@ DEMO_ACCOUNTS = {
     },
 }
 
+# Optional extra accounts (only created when set in .env).
+for _key, _role in (("lead", "soc_lead"), ("auditor", "auditor")):
+    _email = os.getenv(f"DEMO_{_key.upper()}_EMAIL", "").strip().lower()
+    _pw = os.getenv(f"DEMO_{_key.upper()}_PASSWORD")
+    if _email and _pw:
+        DEMO_ACCOUNTS[_key] = {"email": _email, "password": _pw,
+                               "role": _role, "department": "soc"}
+
 for department, account in DEMO_ACCOUNTS.items():
     if not account["email"] or not account["password"]:
         raise RuntimeError(
@@ -155,7 +198,8 @@ for department, account in DEMO_ACCOUNTS.items():
 def login(request: LoginRequest):
     email = str(request.email).strip().lower()
 
-    for department, account in DEMO_ACCOUNTS.items():
+    for _key, account in DEMO_ACCOUNTS.items():
+        department = account.get("department", _key)
         if (
             secrets.compare_digest(email, account["email"])
             and password_hash.verify(
@@ -171,6 +215,7 @@ def login(request: LoginRequest):
                     "sub": account["email"],
                     "department": department,
                     "role": account["role"],
+                    "jti": secrets.token_hex(16),
                     "exp": expires,
                 },
                 JWT_SECRET,
@@ -205,19 +250,22 @@ def get_current_user(
         email = payload.get("sub")
         department = payload.get("department")
         role = payload.get("role")
+        jti = payload.get("jti")
+        if jti and jti in revoked_jtis():
+            raise HTTPException(status_code=401, detail="Token revoked")
 
         # Each department must have its expected role.
         expected_roles = {
-            "hr": "employee",
-            "engineering": "employee",
-            "finance": "employee",
-            "soc": "soc_analyst",
+            "hr": {"employee"},
+            "engineering": {"employee"},
+            "finance": {"employee"},
+            "soc": {"soc_analyst", "soc_lead", "auditor"},
         }
 
         if (
             not email
             or department not in expected_roles
-            or role != expected_roles[department]
+            or role not in expected_roles[department]
         ):
             raise HTTPException(
                 status_code=401,
@@ -228,6 +276,7 @@ def get_current_user(
             "username": email,
             "department": department,
             "role": role,
+            "jti": jti,
         }
 
     except jwt.InvalidTokenError:
@@ -253,10 +302,10 @@ def chat(
     retrieval_start = time.perf_counter()
 
     # Select the knowledge base using the verified JWT identity.
-    if current_user["role"] == "soc_analyst":
-        active_vector_store = soc_vector_store
+    if current_user["role"] in {"soc_analyst", "soc_lead", "auditor"}:
+        active_vector_store = get_soc_vector_store()
     else:
-        active_vector_store = vector_store
+        active_vector_store = get_vector_store()
 
     docs = retrieve_authorized_documents(
         active_vector_store,
@@ -329,7 +378,7 @@ def typosquatting_scan(
     department = str(current_user.get("department", "")).strip().lower()
     role = str(current_user.get("role", "")).strip().lower()
 
-    if department != "soc" or role != "soc_analyst":
+    if department != "soc" or role not in {"soc_analyst", "soc_lead"}:
         raise HTTPException(
             status_code=403,
             detail="Only authenticated SOC analysts can use this scanner.",
@@ -343,70 +392,10 @@ def typosquatting_scan(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    
-# Select the knowledge base from the verified JWT identity.
 
-    if current_user["role"] == "soc_analyst":
-        active_vector_store = soc_vector_store
-    else:
-        active_vector_store = vector_store
+# Incident management routes (policy-checked, audited; see incident_api.py).
+from incident_api import build_router, revoke_jti, revoked_jtis  # noqa: E402
 
-    docs = retrieve_authorized_documents(
-        active_vector_store,
-        request.question.strip(),
-        current_user,
-    )
-
-
-    retrieval_ms = round(
-        (time.perf_counter() - retrieval_start) * 1000, 2
-    )
-
-    sources = [
-        {
-            "source": doc.metadata.get("source", "unknown"),
-            "classification": doc.metadata.get("classification", "unknown"),
-            "department": doc.metadata.get("department", "unknown"),
-        }
-        for doc in docs
-    ]
-
-    context = "\n\n".join(doc.page_content for doc in docs)
-
-    if not docs:
-        answer = "I don't know based on the information I'm authorized to access."
-    else:
-        chain = prompt | llm
-
-        generation_start = time.perf_counter()
-
-        result = chain.invoke({
-            "context": context,
-            "question": request.question.strip(),
-        })
-
-        generation_ms = round(
-            (time.perf_counter() - generation_start) * 1000, 2
-        )
-
-        answer = result.content
-
-        if isinstance(answer, list):
-            answer = "\n".join(
-                item.get("text", str(item))
-                if isinstance(item, dict)
-                else str(item)
-                for item in answer
-            )
-
-        if not isinstance(answer, str):
-            answer = str(answer)
-
-    return {
-        "answer": answer,
-        "sources": sources,
-        "context_preview": context[:1500],
-        "department": department,
-        "retrieval_ms": retrieval_ms,
-        "generation_ms": generation_ms,
-}
+app.include_router(build_router(get_current_user))
+from qr_api import build_router as build_qr_router  # noqa: E402
+app.include_router(build_qr_router(get_current_user))

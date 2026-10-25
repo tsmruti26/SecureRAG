@@ -1,0 +1,30 @@
+# Knowledge-base search. Specific rules first (first matching allow wins).
+rules:
+  - id: kb-hr-employee
+    effect: allow
+    subject: { role: [employee], department: [hr] }
+    action: kb.search
+    resource: { collection: [handbook] }
+    kb_scopes:
+      - { department: all, classification: internal }
+      - { department: hr, classification: confidential }
+    obligations: [audit]
+
+  - id: kb-employee
+    effect: allow
+    subject: { role: [employee], department: [engineering, finance] }
+    action: kb.search
+    resource: { collection: [handbook] }
+    kb_scopes:
+      - { department: all, classification: internal }
+    obligations: [audit]
+
+  - id: kb-soc
+    effect: allow
+    subject: { role: [soc_analyst, soc_lead, auditor] }
+    action: kb.search
+    resource: { collection: [soc] }
+    kb_scopes:
+      - { department: soc, classification: internal }
+      - { department: soc, classification: confidential }
+    obligations: [audit]
